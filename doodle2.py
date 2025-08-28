@@ -63,7 +63,33 @@ def fill_triangular_inverse(x, upper=False):
     technically noise-flow implemented tensorflow.contrib.distributions.fill_triangular_inverse
     but tensorflow.contrib.distributions got deprecated and replaced by tfp (tensorflow-probability)
     '''
-    pass
+    x = torch.as_tensor(x)
+    if x.ndim < 2:
+        raise ValueError('x must have rank 2')
+    n = x.shape[-1]
+    m = (n*(n+1)) // 2
+    final_shape = x.shape[:-2] + (m,)
+    ndims = x.ndim
+    if upper:
+        initial_elements = x[..., 0, :]                         # first row
+        triangular_portion = x[..., 1:, :]                      # remaining rows
+    else:
+        initial_elements = torch.flip(x[..., -1, :], dims=[ndims - 2]) # last row, reversed
+        triangular_portion = x[..., :-1, :]                      # all but last row
+    # Double reverse operation
+    rotated_triangular_portion = torch.flip(
+        torch.flip(triangular_portion, dims=[ndims - 1]), dims=[ndims - 2])
+    consolidated_matrix = triangular_portion + rotated_triangular_portion
+    # Reshape operation
+    batch_shape = x.shape[:-2]
+    new_shape = batch_shape + (n * (n - 1),)
+    end_sequence = consolidated_matrix.reshape(new_shape)
+    # Concatenation
+    y = torch.cat([initial_elements, end_sequence[..., :m - n]], dim=-1)
+    # Note: PyTorch doesn't have static shape setting like TensorFlow
+    # The shape is automatically tracked at runtime
+    return y
+
 
 
 def main():
@@ -82,12 +108,15 @@ def main():
     # -----------------------------
     x = fill_triangular([1, 2, 3, 4, 5, 6], True)
     print(x)
+    print(fill_triangular_inverse(x, True))
     print()
     x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], True)
     print(x)
+    print(fill_triangular_inverse(x, True))
     print()
     x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], True)
     print(x)
+    print(fill_triangular_inverse(x, True))
     print()
 
 if __name__ == "__main__":
