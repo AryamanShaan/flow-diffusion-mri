@@ -26,7 +26,6 @@ test_data = datasets.FashionMNIST(
 train_dataloader = DataLoader(training_data, batch_size=64, shuffle=True)
 test_dataloader = DataLoader(test_data, batch_size=64, shuffle=True)
 
-
 class NeuralNetwork(nn.Module):
     def __init__(self):
         super().__init__()
@@ -52,7 +51,8 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size, device):
     # Unnecessary in this situation but added for best practices
     model.train()
     for batch, (X, y) in enumerate(dataloader):
-        X, y = X.to(device), y.to(device)     
+        X, y = X.to(device), y.to(device)   
+        print('shape of X is {}', X.shape)  
         # Compute prediction and loss
         pred = model(X)
         loss = loss_fn(pred, y)
