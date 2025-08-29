@@ -106,17 +106,17 @@ def main():
     # n = np.sqrt(0.25 + 2. * m) - 0.5
     # print(n)
     # -----------------------------
-    x = fill_triangular([1, 2, 3, 4, 5, 6], True)
+    # x = fill_triangular([1, 2, 3, 4, 5, 6], True)
+    # print(x)
+    # print(fill_triangular_inverse(x, True))
+    # print()
+    # x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], True)
+    # print(x)
+    # print(fill_triangular_inverse(x, True))
+    # print()
+    x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], False)
     print(x)
-    print(fill_triangular_inverse(x, True))
-    print()
-    x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], True)
-    print(x)
-    print(fill_triangular_inverse(x, True))
-    print()
-    x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], True)
-    print(x)
-    print(fill_triangular_inverse(x, True))
+    print(fill_triangular_inverse(x, False))
     print()
 
 if __name__ == "__main__":

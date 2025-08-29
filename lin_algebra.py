@@ -12,14 +12,57 @@ def matrix_param_none(init_A, dtype=torch.float32, device=None):
     return {'A': A, 'A_inv': A_inv, 'log_abs_det': log_abs_det}
 
 
-def vec2stricttri(matrix):
+def vec2stricttri(matrix, upper:bool):
     # assume matrix is a tensor
+    matrix = torch.as_tensor(matrix) # TODO check if this line is alright
     if matrix.shape[-1:] == [0]:
         return matrix
-    matrix = matrix.view(-1, matrix.size(-1)) # converting torch.Size([2, 3, 4, 5]) to torch.Size([24, 5])
+    
+    batch_shape = matrix.shape[:-1]
+
+    matrix = matrix.reshape(-1, matrix.size(-1)) # converting torch.Size([2, 3, 4, 5]) to torch.Size([24, 5])
+
+    M_tri_base = fill_triangular(matrix, upper=upper)
+
+    if upper:
+        result = torch.nn.functional.pad(M_tri_base, (1, 0, 0, 1))  # (left, right, top, bottom)
+    else:
+        result = torch.nn.functional.pad(M_tri_base, (0, 1, 1, 0))
+    
+    final_shape = batch_shape + result.shape[-2:]
+    return result.reshape(final_shape)
 
 
+def stricttri2vec(matrix, upper:bool):
+    matrix = torch.as_tensor(matrix) # TODO check if this line is alright
+    if tuple(matrix.shape[-2:]) == (0, 0):
+        return matrix
 
+    batch_shape = matrix.shape[:-2]
+
+    r, c = matrix.shape[-2], matrix.shape[-1]
+    matrix = matrix.reshape(-1, r, c)
+
+    if upper:
+        # remove last row, first column
+        matrix_trim = matrix[..., :-1, 1:]
+        # keep upper-triangular (incl. main diagonal)
+        matrix_tri = torch.triu(matrix_trim, diagonal=0)
+    else:
+        # remove first row, last column
+        matrix_trim = matrix[..., 1:, :-1]
+        # keep lower-triangular (incl. main diagonal)
+        matrix_tri = torch.tril(matrix_trim, diagonal=0)
+
+    # early exit if empty 0x0
+    if tuple(matrix_trim.shape[-2:]) == (0, 0):
+        return matrix_trim
+
+    result = fill_triangular_inverse(matrix_tri, upper=upper)    
+
+    final_shape = batch_shape + (result.shape[-1],)
+    ret = result.reshape(final_shape)   
+    return ret
 
 
 def fill_triangular(x, upper=False):
@@ -98,3 +141,13 @@ def fill_triangular_inverse(x, upper=False):
     return y
 
 
+# For testing
+def main():
+    x = vec2stricttri([ 1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15], False)
+    print(x)
+    print()
+    x= stricttri2vec(x, False)
+    print(x)
+
+if __name__ == "__main__":
+    main()
