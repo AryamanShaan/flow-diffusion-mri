@@ -2,6 +2,7 @@ import numpy as np
 import scipy as sp
 import torch
 from torch import nn
+import scipy as sp
 
 
 # matrix_param_none function is not really used
@@ -141,13 +142,16 @@ def fill_triangular_inverse(x, upper=False):
     return y
 
 
-# For testing
-def main():
-    x = vec2stricttri([ 1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15], False)
-    print(x)
-    print()
-    x= stricttri2vec(x, False)
-    print(x)
+# def matrix_param_lu(init_A):
+    
 
-if __name__ == "__main__":
-    main()
+# # For testing
+# def main():
+#     x = vec2stricttri([ 1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15], False)
+#     print(x)
+#     print()
+#     x= stricttri2vec(x, False)
+#     print(x)
+
+# if __name__ == "__main__":
+#     main()

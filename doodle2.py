@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import numpy as np
+import scipy as sp
 
 def flatten_everything_but_c():
     # Example tensor (B, H, W, C) like in TF (NHWC)
@@ -90,6 +91,13 @@ def fill_triangular_inverse(x, upper=False):
     # The shape is automatically tracked at runtime
     return y
 
+def is_orthogonal_np(Q, tol=1e-6):
+    I = np.eye(Q.shape[0])
+    should_be_I = Q.T @ Q
+    diff = np.linalg.norm(should_be_I - I)
+    print("Q^T Q =\n", should_be_I)
+    print("Difference from identity (Frobenius norm):", diff)
+    return diff < tol
 
 
 def main():
@@ -114,10 +122,61 @@ def main():
     # print(x)
     # print(fill_triangular_inverse(x, True))
     # print()
-    x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], False)
-    print(x)
-    print(fill_triangular_inverse(x, False))
+    # x = fill_triangular([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], False)
+    # print(x)
+    # print(fill_triangular_inverse(x, False))
+    # print()
+    # -----------------------------
+    w_shape = [5,5]
+    np_w = sp.linalg.qr(np.random.randn(*w_shape))[0].astype('float32') 
+
+    print("Initial np_w (orthogonal init):")
+    print(np_w)
     print()
+
+    print("Is np_w orthogonal?", is_orthogonal_np(np_w))
+    print()
+
+    # Step 1: LU decomposition
+    init_A = np_w
+    np_p, np_l, np_u = sp.linalg.lu(init_A)
+
+    print("Permutation matrix P:")
+    print(np_p)
+    print()
+
+    print("Lower-triangular L:")
+    print(np_l)
+    print()
+
+    print("Upper-triangular U:")
+    print(np_u)
+    print()
+
+    # Step 2: Extract diagonal of U
+    np_s = np.diag(np_u)
+    print("Diagonal entries of U:")
+    print(np_s)
+    print()
+
+    # Step 3: Get their signs
+    np_sign_s = np.sign(np_s)
+    print("Signs of diagonal entries of U:")
+    print(np_sign_s)
+    print()
+
+    # Step 4: Log absolute values
+    np_log_s = np.log(np.abs(np_s))
+    print("Log absolute values of diagonal entries of U:")
+    print(np_log_s)
+    print()
+
+    # Step 5: Strictly upper part (zero out diagonal and below)
+    np_u_strict = np.triu(np_u, k=1)
+    print("Strictly upper part of U (diagonal zeroed out):")
+    print(np_u_strict)
+    print()
+
 
 if __name__ == "__main__":
     main()
