@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 import numpy as np
 from lin_algebra import *
 import scipy as sp
@@ -36,7 +37,7 @@ class Conv2d1x1(nn.Module):
 
         np_s = np.diag(np_u)
         np_sign_s = np.sign(np_s)
-        np_log_s = np.log(abs(np_s))
+        np_log_s = np.log(np.abs(np_s))
         np_u = np.triu(np_u, k=1)
 
         # P is constant (not trainable)
@@ -55,8 +56,9 @@ class Conv2d1x1(nn.Module):
         # matrix_params_lu part ends
         ########################
 
-        if self.bias:
-            pass
+        self.bias = None
+        if self._bias:
+            self.bias = nn.Parameter(torch.zeros(self.ic))
 
     def _assemble_A(self):
         '''
@@ -84,19 +86,47 @@ class Conv2d1x1(nn.Module):
         return A, A_inv, log_abs_det
 
 
-    def forward(self, x):
-        pass
+    def inverse(self, x):
+        '''
+        This is actually the 'forward' function in flow model terminology || z -> x || applies A_inv || used for sampling
+        '''
+        if self._last_layer:
+            n = x.shape[0]
+            x = x.view(n, self.ic, self.i0, self.i1)  # NCHW
+        if self._bias and self.bias is not None:
+            x = x - self.bias.view(1, -1, 1, 1)
 
-    def inverse(self, y):
-        pass
+        _, A_inv, _ = self._assemble_A() # Assemble A and its inverse (A_inv is CxC)
+        W = A_inv.view(self.ic, self.ic, 1, 1)  # PyTorch conv2d wants (outC, inC, kH, kW) = (C, C, 1, 1)
+        y = F.conv2d(x, W, bias=None) # 1x1 convolution applying the channel-mixing A^{-1}
 
-    def _forward_log_det_jacobian(self, x):
-        pass
+        return y
+    
 
-    def _inverse_log_det_jacobian(self, y):
-        pass
+    def forward(self, y):
+        '''
+        This is actually the 'inverse' function in flow model terminology || x -> z || applies A || used for loss
+        '''
+        A, _, ladj = self._assemble_A()   # A is (C, C)
+        W = A.view(self.ic, self.ic, 1, 1)     # conv weight (outC, inC, 1, 1)
+        x = F.conv2d(y, W, bias=None)           # 1x1 channel mixing
 
-    def _forward_and_log_det_jacobian(self, x):
+        if self._bias and self.bias is not None:
+            x = x + self.bias.view(1, -1, 1, 1)            # add per-channel bias
+
+        if self._last_layer:
+            x = x.reshape(x.size(0), self.ic * self.i0 * self.i1)  # flatten
+        
+        return x
+
+    def _forward_log_det_jacobian(self, x=None):
+        return -self.inverse_log_det_jacobian()
+
+    def _inverse_log_det_jacobian(self, y=None):
+        _, _, log_abs_det = self._assemble_A()   # log|det A|
+        return log_abs_det * (self.i0 * self.i1)
+
+    def _forward_and_log_det_jacobian(self, x): 
         pass
 
     def _inverse_and_log_det_jacobian(self, y):
@@ -110,7 +140,34 @@ class Conv2d1x1(nn.Module):
 
 # For testing
 def main():
-    pass
+    C,H,W = 4, 5, 6
+    layer = Conv2d1x1((C,H,W), bias=True, last_layer=False, decomp='LU')  # you currently only implement LU
+    inp = torch.randn(2, C, H, W)
+    z = layer(inp)                # forward: data -> latent
+    rec = layer.inverse(z)        # latent -> data
+    print("recon err:", (inp - rec).abs().max().item())
+    print("logdet inverse:", layer._inverse_log_det_jacobian().item())
+
+    # A * A_inv ≈ I ?
+    A, A_inv, ladj = layer._assemble_A()
+    print("||A A_inv - I||:", torch.norm(A @ A_inv - torch.eye(A.size(0))).item())
+
+    # forward & inverse logdets should be negatives
+    ladj_inv = layer._inverse_log_det_jacobian()
+    ladj_fwd = -ladj_inv
+    print("ladj:", ladj.item(), " ladj_inv:", ladj_inv.item(), " ladj_fwd:", ladj_fwd.item())
+
+    # gradient sanity: make sure params get grads
+    x = torch.randn(2, layer.ic, layer.i0, layer.i1)
+    z = layer(x)
+    loss = z.pow(2).mean()
+    loss.backward()
+    print("has grad l_vec/u_vec/log_s:",
+      layer.l_vec.grad is not None,
+      layer.u_vec.grad is not None,
+      layer.log_s.grad is not None)
+
+
 
 if __name__ == "__main__":
     main()
