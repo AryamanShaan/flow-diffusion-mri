@@ -134,40 +134,138 @@ class Conv2d1x1(nn.Module):
 
     def _inverse_and_log_det_jacobian___(self, z, y):
         pass
+
+
+class subnetMLP(nn.Module):
+    """
+    PyTorch port of the TF 'real_nvp_default_template' (channel-split version) in noise-flow repo.
+    Input:  x of shape (N, C_in, H, W) where C_in = C_total // 2
+    Output: (shift, log_scale) each (N, C_in, H, W)  OR (shift, None) if shift_only=True
+    """
+    def __init__(self,
+                 x_shape,                # [C, H, W] - no batch size
+                 hidden_layers,          # e.g., [512, 512]
+                 shift_only: bool = False):
+        super().__init__()
+        self.shift_only = shift_only
+
+        # H, W, C_total = x_shape
+        # C_in = C_total // 2
+        # self.H, self.W, self.C_in = H, W, C_in
+
+        self.C_in, self.H, self.W = x_shape # not doing C_total/2 since input has just one channel and mask used in AffineCoupling
+
+        in_features = self.C_in * self.H * self.W
+
+        layers = []
+        prev = in_features
+        for i, units in enumerate(hidden_layers):
+            layers.append(nn.Linear(prev, units, bias=True))
+            layers.append(nn.BatchNorm1d(units))           # BN after dense (mirrors TF BN)
+            layers.append(nn.ReLU())                # activation
+            prev = units
+        self.mlp = nn.Sequential(*layers)
+
+        out_features = in_features if shift_only else 2 * in_features
+        self.proj = nn.Linear(prev, out_features, bias=True)
+
+        # ---- initialization ----
+        # zero-init final layer (identity start for coupling)
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+        # He init hidden linears (good for ReLU-family)
+        for m in self.mlp:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+                nn.init.zeros_(m.bias)
+
+
+    def forward(self, x: torch.Tensor):
+        """
+        x: (N, C_in, H, W)  
+        """
+        N, C, H, W = x.shape
+        assert (C, H, W) == (self.C_in, self.H, self.W), \
+            f"Expected (N,{self.C_in},{self.H},{self.W}), got {tuple(x.shape)}"
+
+        x_flat = x.reshape(N, -1)            # (N, H*W*C_in)
+        h = self.mlp(x_flat)            # (N, hidden_last)
+        out = self.proj(h)              # (N, (1 or 2)*H*W*C_in)
+
+        if self.shift_only:
+            shift = out.view(N, C, H, W)
+            log_scale = None
+            return shift, log_scale
+
+        out = out.reshape(N, 2 * C, H, W)
+        shift, log_scale = torch.split(out, [C, C], dim=1)
+        return shift, log_scale
         
+
+
+
+
+class AffineCoupling(nn.Module):
+
+    def __init__(self, x_shape, shift_and_log_scale_fn, layer_id=0, last_layer=False,validate_args=False):
+        super().__init__()
+        pass
+
+
 
     
 
 # For testing
 def main():
-    C,H,W = 4, 5, 6
-    layer = Conv2d1x1((C,H,W), bias=True, last_layer=False, decomp='LU')  # you currently only implement LU
-    inp = torch.randn(2, C, H, W)
-    z = layer(inp)                # forward: data -> latent
-    rec = layer.inverse(z)        # latent -> data
-    print("recon err:", (inp - rec).abs().max().item())
-    print("logdet inverse:", layer._inverse_log_det_jacobian().item())
+    # C,H,W = 4, 5, 6
+    # layer = Conv2d1x1((C,H,W), bias=True, last_layer=False, decomp='LU')  # you currently only implement LU
+    # inp = torch.randn(2, C, H, W)
+    # z = layer(inp)                # forward: data -> latent
+    # rec = layer.inverse(z)        # latent -> data
+    # print("recon err:", (inp - rec).abs().max().item())
+    # print("logdet inverse:", layer._inverse_log_det_jacobian().item())
 
-    # A * A_inv ≈ I ?
-    A, A_inv, ladj = layer._assemble_A()
-    print("||A A_inv - I||:", torch.norm(A @ A_inv - torch.eye(A.size(0))).item())
+    # # A * A_inv ≈ I ?
+    # A, A_inv, ladj = layer._assemble_A()
+    # print("||A A_inv - I||:", torch.norm(A @ A_inv - torch.eye(A.size(0))).item())
 
-    # forward & inverse logdets should be negatives
-    ladj_inv = layer._inverse_log_det_jacobian()
-    ladj_fwd = -ladj_inv
-    print("ladj:", ladj.item(), " ladj_inv:", ladj_inv.item(), " ladj_fwd:", ladj_fwd.item())
+    # # forward & inverse logdets should be negatives
+    # ladj_inv = layer._inverse_log_det_jacobian()
+    # ladj_fwd = -ladj_inv
+    # print("ladj:", ladj.item(), " ladj_inv:", ladj_inv.item(), " ladj_fwd:", ladj_fwd.item())
 
-    # gradient sanity: make sure params get grads
-    x = torch.randn(2, layer.ic, layer.i0, layer.i1)
-    z = layer(x)
-    loss = z.pow(2).mean()
+    # # gradient sanity: make sure params get grads
+    # x = torch.randn(2, layer.ic, layer.i0, layer.i1)
+    # z = layer(x)
+    # loss = z.pow(2).mean()
+    # loss.backward()
+    # print("has grad l_vec/u_vec/log_s:",
+    #   layer.l_vec.grad is not None,
+    #   layer.u_vec.grad is not None,
+    #   layer.log_s.grad is not None)
+
+    # -------------------------------------------------------
+    # Create the subnet for MNIST-like input (1 channel, 28x28)
+    subnet = subnetMLP(x_shape=[1, 28, 28],
+                            hidden_layers=[64, 64],
+                            shift_only=False)
+
+    # Fake MNIST batch: 8 samples of 1×28×28
+    x = torch.randn(8, 1, 28, 28, requires_grad=True)
+
+    # Forward pass
+    shift, log_scale = subnet(x)
+
+    print("Input shape:    ", x.shape)
+    print("Shift shape:    ", shift.shape)
+    print("Log_scale shape:", log_scale.shape)
+
+    # Simple scalar loss to check gradients flow
+    loss = (shift.mean() + log_scale.mean())
     loss.backward()
-    print("has grad l_vec/u_vec/log_s:",
-      layer.l_vec.grad is not None,
-      layer.u_vec.grad is not None,
-      layer.log_s.grad is not None)
 
-
+    print("\nGradient on input? ", x.grad is not None)
+    print("Gradient on first linear weight? ", subnet.mlp[0].weight.grad is not None)
 
 if __name__ == "__main__":
     main()
