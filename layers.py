@@ -120,11 +120,13 @@ class Conv2d1x1(nn.Module):
         return x
 
     def _forward_log_det_jacobian(self, x=None):
-        return -self.inverse_log_det_jacobian()
+        _, _, log_abs_det = self._assemble_A()   # log|det A|
+        return log_abs_det * (self.i0 * self.i1)
+
 
     def _inverse_log_det_jacobian(self, y=None):
         _, _, log_abs_det = self._assemble_A()   # log|det A|
-        return log_abs_det * (self.i0 * self.i1)
+        return -log_abs_det * (self.i0 * self.i1)
 
     def _forward_and_log_det_jacobian(self, x): 
         pass
@@ -153,7 +155,7 @@ class subnetMLP(nn.Module):
         # C_in = C_total // 2
         # self.H, self.W, self.C_in = H, W, C_in
 
-        self.C_in, self.H, self.W = x_shape # not doing C_total/2 since input has just one channel and mask used in AffineCoupling
+        self.C_in, self.H, self.W = x_shape # not doing C_total/2 since input may have one channel 
 
         in_features = self.C_in * self.H * self.W
 
@@ -204,19 +206,136 @@ class subnetMLP(nn.Module):
 
 
 
-
 class AffineCoupling(nn.Module):
 
-    def __init__(self, x_shape, shift_and_log_scale_fn, layer_id=0, last_layer=False,validate_args=False):
+    def __init__(self,
+                 x_shape,                     
+                 shift_and_log_scale_fn,      # callable: x0 -> (shift, log_scale), both shaped like x1
+                 layer_id: int = 0,
+                 last_layer: bool = False,
+                 name: str = "real_nvp"):
         super().__init__()
+        self.x_shape = x_shape
+        self.ic, self.i0, self.i1  = x_shape  
+        self._last_layer = last_layer
+        self.id = layer_id
+        self._shift_and_log_scale_fn = shift_and_log_scale_fn # instance of subnetMLP
+
+        # Learnable scalar for tempering log_scale: scale * tanh(log_scale)
+        self.scale = nn.Parameter(torch.tensor(1e-4, dtype=torch.float32))
+
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        '''
+        This is actually the 'inverse' function in flow model terminology || x -> z || used for loss
+        '''
+        # x is assumed NCHW 
+
+        C = x.shape[1]
+        assert C % 2 == 0, f"Coupling split needs even channels, got C={C}"
+        x0, x1 =  x[:, :C // 2, ...], x[:, C // 2:, ...]
+        # assert C == self.ic, f"Expected channel={self.ic}, got {C}"
+
+        shift, log_scale = self._shift_and_log_scale_fn(x0)
+        assert shift.shape == x1.shape and (log_scale is None or log_scale.shape == x1.shape)
+        if log_scale is not None:
+            log_scale = self.scale * torch.tanh(log_scale)
+
+        y1 = x1
+        if log_scale is not None:
+            y1 = y1 * torch.exp(log_scale)
+        if shift is not None:
+            y1 = y1 + shift
+
+        x = torch.cat([x0, y1], dim=1)
+        if self._last_layer and x.dim() == 4:
+            N = x.shape[0]
+            x = x.contiguous().view(N, -1)  
+        return x
+
+
+    def inverse(self, y: torch.Tensor) -> torch.Tensor:
+        '''
+        This is actually the 'forward' function in flow model terminology || z - > x || used for sampling
+        '''
+        if self._last_layer and y.dim() == 2: # if last_layer and 2D, reshape to NCHW
+            N = y.shape[0]
+            C, H, W = self.ic, self.i0, self.i1
+            y = y.view(N, C, H, W).contiguous()  
+        C = y.shape[1]
+        assert C % 2 == 0, f"Coupling split needs even channels, got C={C}"
+        y0, y1 =  y[:, :C // 2, ...], y[:, C // 2:, ...]
+        # assert C == self.ic, f"Expected channel={self.ic}, got {C}"
+
+        shift, log_scale = self._shift_and_log_scale_fn(y0)
+        assert shift.shape == y1.shape and (log_scale is None or log_scale.shape == y1.shape)
+        if log_scale is not None:
+            log_scale = self.scale * torch.tanh(log_scale)
+
+        x1 = y1
+        if shift is not None:
+            x1 = x1 - shift
+        if log_scale is not None:
+            x1 = x1 * torch.exp(-log_scale)
+
+        x = torch.cat([y0, x1], dim=1)
+        return x
+
+
+    def forward_log_det_jacobian(self, z: torch.Tensor) -> torch.Tensor:
+
+        C = z.shape[1]
+        assert C % 2 == 0, f"Coupling split needs even channels, got C={C}"
+        z0, _ =  z[:, :C // 2, ...], z[:, C // 2:, ...]
+        # assert C == self.ic, f"Expected channel={self.ic}, got {C}"
+
+        _, log_scale = self._shift_and_log_scale_fn(z0)
+        assert log_scale is None or log_scale.shape == z0.shape
+        if log_scale is not None:
+            log_scale = self.scale * torch.tanh(log_scale)
+
+        if log_scale is None:
+            return torch.zeros(z.size(0), dtype=z.dtype, device=z.device)
+
+        return log_scale.flatten(1).sum(dim=1)
+    
+
+    def inverse_log_det_jacobian(self, x: torch.Tensor) -> torch.Tensor:
+
+        # if last_layer and 2D, reshape to NCHW
+        C = x.shape[1]
+        assert C % 2 == 0, f"Coupling split needs even channels, got C={C}"
+        x0, _ =  x[:, :C // 2, ...], x[:, C // 2:, ...]
+        # assert C == self.ic, f"Expected channel={self.ic}, got {C}"
+
+        _, log_scale = self._shift_and_log_scale_fn(x0)
+        assert log_scale is None or log_scale.shape == x0.shape
+        if log_scale is not None:
+            log_scale = self.scale * torch.tanh(log_scale)
+
+        if log_scale is None:
+            return torch.zeros(x.size(0), dtype=x.dtype, device=x.device)
+
+        # sum over transformed half: (N, C/2, H, W) -> (N,)
+        return -log_scale.flatten(1).sum(dim=1)
+
+
+    def forward_and_log_det_jacobian(self, x: torch.Tensor):
         pass
 
+    def inverse_and_log_det_jacobian(self, y: torch.Tensor):
+        pass
 
 
     
 
 # For testing
 def main():
+
+    # ******************************************************************
+    '''
+    Testing conv2d1x1
+    '''
     # C,H,W = 4, 5, 6
     # layer = Conv2d1x1((C,H,W), bias=True, last_layer=False, decomp='LU')  # you currently only implement LU
     # inp = torch.randn(2, C, H, W)
@@ -244,28 +363,107 @@ def main():
     #   layer.u_vec.grad is not None,
     #   layer.log_s.grad is not None)
 
-    # -------------------------------------------------------
+    # ******************************************************************
+    '''
+    Testing subnet
+    '''
     # Create the subnet for MNIST-like input (1 channel, 28x28)
-    subnet = subnetMLP(x_shape=[1, 28, 28],
-                            hidden_layers=[64, 64],
-                            shift_only=False)
+#     subnet = subnetMLP(x_shape=[1, 28, 28],
+#                             hidden_layers=[64, 64],
+#                             shift_only=False)
 
-    # Fake MNIST batch: 8 samples of 1×28×28
-    x = torch.randn(8, 1, 28, 28, requires_grad=True)
+#     # Fake MNIST batch: 8 samples of 1×28×28
+#     x = torch.randn(8, 1, 28, 28, requires_grad=True)
 
-    # Forward pass
-    shift, log_scale = subnet(x)
+#     # Forward pass
+#     shift, log_scale = subnet(x)
 
-    print("Input shape:    ", x.shape)
-    print("Shift shape:    ", shift.shape)
-    print("Log_scale shape:", log_scale.shape)
+#     print("Input shape:    ", x.shape)
+#     print("Shift shape:    ", shift.shape)
+#     print("Log_scale shape:", log_scale.shape)
 
-    # Simple scalar loss to check gradients flow
-    loss = (shift.mean() + log_scale.mean())
-    loss.backward()
+#     # Simple scalar loss to check gradients flow
+#     loss = (shift.mean() + log_scale.mean())
+#     loss.backward()
 
-    print("\nGradient on input? ", x.grad is not None)
-    print("Gradient on first linear weight? ", subnet.mlp[0].weight.grad is not None)
+#     print("\nGradient on input? ", x.grad is not None)
+#     print("Gradient on first linear weight? ", subnet.mlp[0].weight.grad is not None)
+
+    # ******************************************************************
+    '''
+    Testing AffineCoupling + subnet
+    '''
+    # torch.manual_seed(0)
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # # Fake MNIST-like: N=8, C_total=2 (even, so channel-split works), H=W=28
+    # N, C_total, H, W = 8, 2, 28, 28
+    # x = torch.randn(N, C_total, H, W, device=device, requires_grad=True)
+
+    # # subnet must be built for HALF the channels (C_in = C_total//2)
+    # st_net = subnetMLP(x_shape=(C_total // 2, H, W), hidden_layers=[512, 512], shift_only=False).to(device)
+    # st_net.train()  # enable BN training mode for this test
+
+    # # coupling built with full (C, H, W)
+    # coupling = AffineCoupling(
+    #     x_shape=(C_total, H, W),
+    #     shift_and_log_scale_fn=st_net,
+    #     last_layer=False
+    # ).to(device)
+
+    # # ---------- forward: x -> z ----------
+    # z = coupling.forward(x)
+    # assert z.shape == x.shape, f"z shape {z.shape} != x shape {x.shape}"
+
+    # fldj = coupling.forward_log_det_jacobian(x)  # log|det J_f(x)|
+    # assert fldj.shape == (N,), f"fldj shape {fldj.shape} != {(N,)}"
+
+    # # ---------- inverse: z -> x_recon ----------
+    # x_recon = coupling.inverse(z)
+    # recon_err = (x_recon - x).abs().max().item()
+    # print(f"recon error || inverse(forward(x)) - x ||_inf = {recon_err:.3e}")
+    # # expect ~1e-6 to 1e-7 once BN settles; with BN in train mode, small noise is OK
+
+    # # ---------- inverse logdet vs forward logdet ----------
+    # ildj = coupling.inverse_log_det_jacobian(z)  # log|det J_f^{-1}(z)|
+    # # For exact arithmetic, ildj should be -fldj (elementwise)
+    # sign_err = (ildj + fldj).abs().max().item()
+    # print(f"max | ildj + fldj | = {sign_err:.3e}")
+
+    # # ---------- simple backward test ----------
+    # # Use a tiny base logprob to mimic NLL: L = -( -0.5 * z^2 ).mean() - fldj.mean()
+    # # (Not a real training loss, just to check gradients flow)
+    # fake_ll = (-0.5 * z.pow(2)).mean() + fldj.mean()  # log p(z) + log|detJ|
+    # loss = -fake_ll
+    # loss.backward()
+
+    # # Check a couple of grads
+    # has_x_grad = x.grad is not None and torch.isfinite(x.grad).all().item()
+    # has_st_grad = st_net.mlp[0].weight.grad is not None and torch.isfinite(st_net.mlp[0].weight.grad).all().item()
+    # print(f"grad x        : {'OK' if has_x_grad else 'MISSING'}")
+    # print(f"grad st_net w0: {'OK' if has_st_grad else 'MISSING'}")
+
+    # # ---------- also test last_layer flatten/reshape path ----------
+    # coupling_last = AffineCoupling(
+    #     x_shape=(C_total, H, W),
+    #     shift_and_log_scale_fn=st_net,
+    #     last_layer=True
+    # ).to(device)
+
+    # # forward with last_layer=True should flatten the output
+    # z_flat = coupling_last.forward(x.detach().clone().requires_grad_(True))
+    # print("z_flat shape (last_layer=True, forward):", tuple(z_flat.shape))
+    # assert z_flat.dim() == 2 and z_flat.shape[1] == C_total * H * W
+
+    # # inverse should accept flat and return NCHW
+    # x_recon2 = coupling_last.inverse(z_flat)
+    # print("x_recon2 shape (last_layer=True, inverse):", tuple(x_recon2.shape))
+    # assert x_recon2.shape == (N, C_total, H, W)
+
+    # print("\nAll tests ran.")
+
+    # ******************************************************************
+    pass
 
 if __name__ == "__main__":
     main()
