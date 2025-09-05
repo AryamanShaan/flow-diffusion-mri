@@ -1,0 +1,26 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore data files
+data/
+*.csv
+*.pt
+
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore environment/venv
+env/
+venv/
+*.env
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+
+# specific files/folders
+data
+results
+mnist_heteronoise_train.pt

@@ -2,8 +2,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import numpy as np
-from lin_algebra import *
-import scipy as sp
+from layers import Conv2dZeros
+import math
+# from lin_algebra import *
+# import scipy as sp
 
 def squeeze2d(x, factor=2, squeeze_type='chessboard'):
     """
@@ -62,6 +64,98 @@ def unsqueeze2d(x, factor=2, squeeze_type='chessboard'):
     return x
 
 
+# This is not used ?
+class GaussianDiag:
+    def __init__(self, mean, logsd):
+        """
+        mean, logsd: tensors of same shape
+        """
+        self.mean = mean
+        self.logsd = logsd
+        self.eps = torch.randn_like(mean)  # ε ~ N(0,1)
+
+    def sample(self):
+        # z = μ + σ * ε
+        return self.mean + torch.exp(self.logsd) * self.eps
+
+    def sample2(self, eps):
+        # z = μ + σ * ε (custom ε)
+        return self.mean + torch.exp(self.logsd) * eps
+
+    def logps(self, x):
+        # per-element log pdf
+        return -0.5 * (
+            math.log(2 * math.pi)
+            + 2.0 * self.logsd
+            + (x - self.mean) ** 2 / torch.exp(2.0 * self.logsd)
+        )
+
+    def logp(self, x):
+        # joint log pdf: sum over all dims except batch
+        return self.logps(x).flatten(1).sum(dim=1)
+
+    def get_eps(self, x):
+        # recover ε = (x - μ)/σ
+        return (x - self.mean) / torch.exp(self.logsd)
+
+
+
+class Split2D(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.prior_head = Conv2dZeros(channels // 2, channels, kernel_size=3, stride=1)
+
+    @staticmethod
+    def _logp_diag_gaussian(x, mean, logsd):
+        # returns per-sample log-likelihood (N,)
+        return (-0.5 * (
+            math.log(2 * math.pi)
+            + 2.0 * logsd
+            + (x - mean) ** 2 / torch.exp(2.0 * logsd)
+        )).flatten(1).sum(dim=1)
+
+    def forward(self, z, objective):
+        '''
+        implements split2d in the original noise flow code
+        '''
+
+        N, C, H, W = z.shape
+        assert C % 2 == 0, "C must be even"
+        C1 = C // 2
+
+        z1, z2 = z[:, :C1], z[:, C1:]          # split along channels
+        h = self.prior_head(z1)                # (N, 2*C1, H, W)
+        mean = h[:, 0::2]                      # (N, C1, H, W)
+        logsd = h[:, 1::2]                     # (N, C1, H, W)
+
+        logsd = torch.clamp(logsd, -5.0, 5.0) # TODO check
+
+        logp = self._logp_diag_gaussian(z2, mean, logsd)  # (N,)
+        # Broadcast/add to objective
+        if objective.ndim == 0:
+            objective += logp.sum()
+        else:
+            objective += logp
+
+        return z1, objective
+
+
+    def reverse(self, z1, eps_std=None):
+        '''
+        implements split2d_reverse in the org noise flow code
+        '''
+        
+        h = self.prior_head(z1)               # (N, 2*C1, H, W)
+        mean = h[:, 0::2]
+        logsd = h[:, 1::2]
+
+        logsd = torch.clamp(logsd, -5.0, 5.0) #TODO check
+
+        eps = torch.randn_like(mean)
+        if eps_std is not None:
+            eps = eps * eps_std.view(-1, 1, 1, 1)
+        z2 = mean + torch.exp(logsd) * eps
+        return torch.cat([z1, z2], dim=1)
 
 
 
@@ -89,6 +183,23 @@ def main():
     #     max_diff = (x - z).abs().max().item()
     #     print(f"⚠️ Values differ slightly, max diff = {max_diff}")
     #     assert torch.allclose(x, z, atol=1e-8), "Values changed!"
+
+    # ******************************************************************
+    '''
+    checking split2d
+    '''
+    # N, C1, H, W = 4, 8, 16, 16
+    # z1 = torch.randn(N, C1, H, W)
+    # split = Split2D(channels=2*C1)  # module expects full C; it builds head for C/2 = C1
+
+    # # Reverse without eps_std
+    # z = split.reverse(z1)                  # -> (N, 2*C1, H, W)
+    # print(z.shape)  # torch.Size([4, 16, 16, 16])
+
+    # # Reverse with per-sample noise scaling
+    # eps_std = torch.tensor([0.5, 1.0, 2.0, 0.1], dtype=z1.dtype)
+    # z_scaled = split.reverse(z1, eps_std=eps_std)  # same shape, different noise scale per sample
+    # print(z_scaled.shape)  # torch.Size([4, 16, 16, 16])
 
     # ******************************************************************
     pass

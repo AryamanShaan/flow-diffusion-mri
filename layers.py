@@ -240,6 +240,7 @@ class AffineCoupling(nn.Module):
         assert shift.shape == x1.shape and (log_scale is None or log_scale.shape == x1.shape)
         if log_scale is not None:
             log_scale = self.scale * torch.tanh(log_scale)
+            log_scale = torch.clamp(log_scale, -5.0, 5.0) #TODO check
 
         y1 = x1
         if log_scale is not None:
@@ -271,6 +272,7 @@ class AffineCoupling(nn.Module):
         assert shift.shape == y1.shape and (log_scale is None or log_scale.shape == y1.shape)
         if log_scale is not None:
             log_scale = self.scale * torch.tanh(log_scale)
+            log_scale = torch.clamp(log_scale, -5.0, 5.0) #TODO check
 
         x1 = y1
         if shift is not None:
@@ -327,7 +329,71 @@ class AffineCoupling(nn.Module):
         pass
 
 
+class Conv2dZeros(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, logscale_factor=1.0): # TODO check logscale_factor 1.0 or 3.0?
+        super().__init__()
+        # Conv layer with zero-initialized weights & bias
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=kernel_size//2)
+        nn.init.zeros_(self.conv.weight)
+        nn.init.zeros_(self.conv.bias)
+
+        # Per-channel log-scale parameter
+        self.logscale = nn.Parameter(torch.zeros(out_channels))
+        self.logscale_factor = logscale_factor
+
+    def forward(self, x):
+        out = self.conv(x)
+        scale = torch.exp(self.logscale * self.logscale_factor).view(1, -1, 1, 1)
+        return out * scale
+
     
+
+class SignalDependentLayer(nn.Module): # this is not correct maybe, might need to fix
+
+
+    def __init__(self, x_shape, eps: float = 1e-8):
+        super().__init__()
+        self.C, self.H, self.W = x_shape
+        self.eps = eps
+
+        # Learnable scalars b1, b2 -> beta1, beta2. Betas need to be positive
+        self.b1 = nn.Parameter(torch.tensor(-5.0, dtype=torch.float32))  
+        self.b2 = nn.Parameter(torch.tensor( 0.0, dtype=torch.float32))  
+
+
+    def forward_log_det_jacobian(self, x: torch.Tensor, I: torch.Tensor) -> torch.Tensor:
+        '''
+        x -> z || used for training
+        '''
+        beta1 = torch.exp(self.b1)
+        beta2 = torch.exp(self.b2)
+        # numerical safety: inside sqrt and log should be > 0
+        inside = beta1 * I + beta2
+        # clamp to avoid negative due to numerical noise when beta1 ~ 0
+        inside = torch.clamp_min(inside, self.eps)
+        s = torch.sqrt(inside)
+        log_s = torch.log(torch.clamp_min(s, self.eps))
+        log_det_jacobian = log_s.flatten(1).sum(dim=1) 
+        return s * x, log_det_jacobian
+
+    def inverse_log_det_jacobian(self, y: torch.Tensor, I: torch.Tensor) -> torch.Tensor:
+        '''
+        z -> x || used for sampling
+        '''
+        beta1 = torch.exp(self.b1)
+        beta2 = torch.exp(self.b2)
+        # numerical safety: inside sqrt and log should be > 0
+        inside = beta1 * I + beta2
+        # clamp to avoid negative due to numerical noise when beta1 ~ 0
+        inside = torch.clamp_min(inside, self.eps)
+        s = torch.sqrt(inside)
+        log_s = torch.log(torch.clamp_min(s, self.eps))
+        log_det_jacobian = log_s.flatten(1).sum(dim=1) 
+        return y / s, -log_det_jacobian
+
+
+
+
 
 # For testing
 def main():
@@ -463,7 +529,28 @@ def main():
     # print("\nAll tests ran.")
 
     # ******************************************************************
+    '''
+    Testing Conv2dZeros
+    '''
+    # x = torch.randn(4, 3, 16, 16)
+
+    # # Define conv2d_zeros equivalent
+    # conv = Conv2dZeros(in_channels=3, out_channels=8, kernel_size=3)
+
+    # # Forward pass
+    # y = conv(x)
+
+    # # Print shapes
+    # print("Input shape :", x.shape)   # (4, 3, 16, 16)
+    # print("Output shape:", y.shape)   # (4, 8, 16, 16)
+
+    # # Check if output is zero at initialization
+    # print("Max abs value in output:", y.abs().max().item())
+    # print("Are all outputs zero?", torch.allclose(y, torch.zeros_like(y)))
+
+    # ******************************************************************
     pass
+
 
 if __name__ == "__main__":
     main()
