@@ -117,14 +117,14 @@ class Conv2d1x1(nn.Module):
         if self._last_layer:
             x = x.reshape(x.size(0), self.ic * self.i0 * self.i1)  # flatten
         
-        return x
+        return x, ladj * (self.i0 * self.i1)
 
-    def _forward_log_det_jacobian(self, x=None):
+    def _forward_log_det_jacobian(self, x=None): # not used 
         _, _, log_abs_det = self._assemble_A()   # log|det A|
         return log_abs_det * (self.i0 * self.i1)
 
 
-    def _inverse_log_det_jacobian(self, y=None):
+    def _inverse_log_det_jacobian(self, y=None): # not used
         _, _, log_abs_det = self._assemble_A()   # log|det A|
         return -log_abs_det * (self.i0 * self.i1)
 
@@ -252,7 +252,12 @@ class AffineCoupling(nn.Module):
         if self._last_layer and x.dim() == 4:
             N = x.shape[0]
             x = x.contiguous().view(N, -1)  
-        return x
+
+        if log_scale is None:
+            log_scale =  torch.zeros(x.size(0), dtype=x.dtype, device=x.device)
+
+
+        return x, log_scale.flatten(1).sum(dim=1)
 
 
     def inverse(self, y: torch.Tensor) -> torch.Tensor:
@@ -302,7 +307,7 @@ class AffineCoupling(nn.Module):
         return log_scale.flatten(1).sum(dim=1)
     
 
-    def inverse_log_det_jacobian(self, x: torch.Tensor) -> torch.Tensor:
+    def inverse_log_det_jacobian(self, x: torch.Tensor) -> torch.Tensor: # not used 
 
         # if last_layer and 2D, reshape to NCHW
         C = x.shape[1]
@@ -322,7 +327,7 @@ class AffineCoupling(nn.Module):
         return -log_scale.flatten(1).sum(dim=1)
 
 
-    def forward_and_log_det_jacobian(self, x: torch.Tensor):
+    def forward_and_log_det_jacobian(self, x: torch.Tensor): # not used
         pass
 
     def inverse_and_log_det_jacobian(self, y: torch.Tensor):
@@ -346,10 +351,61 @@ class Conv2dZeros(nn.Module):
         scale = torch.exp(self.logscale * self.logscale_factor).view(1, -1, 1, 1)
         return out * scale
 
+
+class ActNorm2d(nn.Module): # TODO check this code with some official code
+
+    def __init__(self, num_channels, eps=1e-6):
+        super().__init__()
+        self.initialized = False
+        self.bias  = nn.Parameter(torch.zeros(1, num_channels, 1, 1))
+        self.scale = nn.Parameter(torch.ones(1, num_channels, 1, 1))
+        self.eps = eps
+
+    @torch.no_grad()
+    def _init_from_data(self, x):
+        # x: (N,C,H,W)
+        mean = x.mean(dim=[0,2,3], keepdim=True)
+        var  = x.var (dim=[0,2,3], unbiased=False, keepdim=True)
+        std  = (var + self.eps).sqrt()
+        self.bias.data  = -mean
+        self.scale.data = 1.0 / std
+        self.initialized = True
+
+    def forward(self, x):
+        if not self.initialized:
+            self._init_from_data(x)
+
+        # ldj per sample (N,)
+        C = x.size(1)
+        H = x.size(2)
+        W = x.size(3)
+        # scale is (1,C,1,1), log|scale| sum over C then * H*W
+        ldj_per_channel = torch.log(torch.abs(self.scale)).view(-1)  # C elements
+        ldj_scalar = (H * W) * ldj_per_channel.sum()
+
+        return self.scale * (x + self.bias), ldj_scalar.expand(x.size(0)) 
+    
+    def inverse(self, y):
+        if not self.initialized:
+            # If called before forward, we can’t init from data; assume identity
+            return y
+        return y / self.scale - self.bias
+
+    def forward_log_det_jacobian(self, x):
+        # ldj per sample (N,)
+        C = x.size(1)
+        H = x.size(2)
+        W = x.size(3)
+        # scale is (1,C,1,1), log|scale| sum over C then * H*W
+        ldj_per_channel = torch.log(torch.abs(self.scale)).view(-1)  # C elements
+        ldj_scalar = (H * W) * ldj_per_channel.sum()
+        return ldj_scalar.expand(x.size(0))  # same for all samples in batch
+
+    
+
     
 
 class SignalDependentLayer(nn.Module): # this is not correct maybe, might need to fix
-
 
     def __init__(self, x_shape, eps: float = 1e-8):
         super().__init__()
@@ -361,7 +417,7 @@ class SignalDependentLayer(nn.Module): # this is not correct maybe, might need t
         self.b2 = nn.Parameter(torch.tensor( 0.0, dtype=torch.float32))  
 
 
-    def forward_log_det_jacobian(self, x: torch.Tensor, I: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, I: torch.Tensor) -> torch.Tensor:
         '''
         x -> z || used for training
         '''
@@ -376,7 +432,7 @@ class SignalDependentLayer(nn.Module): # this is not correct maybe, might need t
         log_det_jacobian = log_s.flatten(1).sum(dim=1) 
         return s * x, log_det_jacobian
 
-    def inverse_log_det_jacobian(self, y: torch.Tensor, I: torch.Tensor) -> torch.Tensor:
+    def inverse(self, y: torch.Tensor, I: torch.Tensor) -> torch.Tensor:
         '''
         z -> x || used for sampling
         '''

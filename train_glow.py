@@ -31,12 +31,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--width", type=int, default=64)          # coupling subnet width
-    parser.add_argument("--depth", type=int, default=6)           # steps per level
+    parser.add_argument("--depth", type=int, default=3)           # steps per level
     parser.add_argument("--levels", type=int, default=2)          # number of levels
     parser.add_argument("--squeeze_factor", type=int, default=2)
-    parser.add_argument("--perm", type=int, default=1)            # 1 = 1x1 conv
     parser.add_argument("--decomp", type=str, default="NONE")     # your Conv2d1x1 setting
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--outdir", type=str, default="runs_glow_mnist")
@@ -66,7 +65,6 @@ def main():
         n_levels=args.levels,
         depth=args.depth,
         width=args.width,
-        flow_permutation=args.perm,
         decomp=args.decomp,
         squeeze_factor=args.squeeze_factor,
         squeeze_type="chessboard",
@@ -86,7 +84,7 @@ def main():
 
             nll, sd_z = model.loss(x)     # nll is mean over batch
             nll.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0) # TODO check
             optimizer.step()
 
             running_nll += nll.item()
@@ -112,7 +110,7 @@ def main():
     # --- Sampling (5 images) ---
     model.eval()
     with torch.no_grad():
-        samples = model.decode(z=None, batch_size=5).detach().cpu()   # (5,1,28,28)
+        samples = model.inverse(z=None, batch_size=5).detach().cpu()   # (5,1,28,28)
         samples = samples.clamp(0.0, 1.0)
 
         # Convert to uint8 [0,255] with proper rounding

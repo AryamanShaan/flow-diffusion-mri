@@ -23,4 +23,3 @@ Thumbs.db
 # specific files/folders
 data
 results
-mnist_heteronoise_train.pt

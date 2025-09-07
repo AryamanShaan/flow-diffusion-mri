@@ -188,19 +188,24 @@ def main():
     '''
     checking split2d
     '''
-    # N, C1, H, W = 4, 8, 16, 16
-    # z1 = torch.randn(N, C1, H, W)
-    # split = Split2D(channels=2*C1)  # module expects full C; it builds head for C/2 = C1
+    # N,C,H,W = 4,8,16,16   # C must be even
+    # z = torch.randn(N,C,H,W)
+    # obj = torch.zeros(N)
 
-    # # Reverse without eps_std
-    # z = split.reverse(z1)                  # -> (N, 2*C1, H, W)
-    # print(z.shape)  # torch.Size([4, 16, 16, 16])
+    # split = Split2D(C)
 
-    # # Reverse with per-sample noise scaling
-    # eps_std = torch.tensor([0.5, 1.0, 2.0, 0.1], dtype=z1.dtype)
-    # z_scaled = split.reverse(z1, eps_std=eps_std)  # same shape, different noise scale per sample
-    # print(z_scaled.shape)  # torch.Size([4, 16, 16, 16])
+    # # Forward
+    # z1,obj_new = split(z,obj)
+    # print("Forward:")
+    # print(" input:", z.shape)
+    # print(" z1   :", z1.shape)
+    # print(" obj  :", obj_new.shape)
 
+    # # Reverse
+    # z_recon = split.reverse(z1)
+    # print("\nReverse:")
+    # print(" z1 input:", z1.shape)
+    # print(" z recon :", z_recon.shape)
     # ******************************************************************
     pass
 
