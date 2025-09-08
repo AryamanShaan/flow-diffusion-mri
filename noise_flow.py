@@ -7,7 +7,7 @@ from layers import *
 from utils import * 
 
 
-# --- one flow step: permutation then coupling (Glow order in your TF code) ---
+
 class FlowStep(nn.Module):
     def __init__(self, x_shape, decomp='NONE', width=128, use_bias_1x1=True):
         """

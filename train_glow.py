@@ -10,7 +10,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms, utils as vutils
 
 from glow import Glow  # assumes glow.py is in the same folder
@@ -29,6 +29,20 @@ def get_top_latent_shape(orig_shape, n_levels, squeeze_factor):
         if level < n_levels - 1:
             C = C // 2  # split keeps half
     return (C, H, W)
+
+class MNIST32_X_Noise(Dataset):
+    """Loads x (clean, 32x32) and noise from a precomputed .pt file."""
+    def __init__(self, pt_path: str):
+        d = torch.load(pt_path, map_location="cpu")
+        self.x = d["x"]         # (N,1,32,32)
+        self.noise = d["noise"] # (N,1,32,32)
+        assert self.x.shape == self.noise.shape
+
+    def __len__(self):
+        return self.x.size(0)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.noise[idx]
 
 def main():
     parser = argparse.ArgumentParser()
