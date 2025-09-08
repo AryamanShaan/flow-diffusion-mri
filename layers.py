@@ -415,7 +415,7 @@ class SignalDependentLayer(nn.Module): # this is not correct maybe, might need t
         # Learnable scalars b1, b2 -> beta1, beta2. Betas need to be positive
         self.b1 = nn.Parameter(torch.tensor(-5.0, dtype=torch.float32))  
         self.b2 = nn.Parameter(torch.tensor( 0.0, dtype=torch.float32))  
-
+    
 
     def forward(self, x: torch.Tensor, I: torch.Tensor) -> torch.Tensor:
         '''
