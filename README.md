@@ -1,0 +1,1 @@
+This repository explores noise modelling using normalizing flows. It is a pytorch implementation of the model specified in the paper titled 'Noise Flow: Noise Modeling with Conditional Normalizing Flows' that can be found at 'https://arxiv.org/pdf/1908.08453'.
