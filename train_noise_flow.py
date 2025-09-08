@@ -7,11 +7,13 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms, utils as vutils
-
-from glow import Glow  # assumes glow.py is in the same folder
-
+from torchvision.utils import save_image
+from noise_flow import NoiseFlow # assumes noise_flow.py is in the same folder
+'''
+python train_noise_flow.py --epochs 20 --batch_size 32
+'''
 def set_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -27,14 +29,28 @@ def get_top_latent_shape(orig_shape, n_levels, squeeze_factor):
             C = C // 2  # split keeps half
     return (C, H, W)
 
+class MNIST32_X_Noise(Dataset):
+    """Loads x (clean, 32x32) and noise from a precomputed .pt file."""
+    def __init__(self, pt_path: str):
+        d = torch.load(pt_path, map_location="cpu")
+        self.x = d["x"]         # (N,1,32,32)
+        self.noise = d["noise"] # (N,1,32,32)
+        assert self.x.shape == self.noise.shape
+
+    def __len__(self):
+        return self.x.size(0)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.noise[idx]
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--width", type=int, default=64)          # coupling subnet width
-    parser.add_argument("--depth", type=int, default=3)           # steps per level
-    parser.add_argument("--levels", type=int, default=2)          # number of levels
+    parser.add_argument("--width", type=int, default=128)          # coupling subnet width
+    parser.add_argument("--depth", type=int, default=5)           # steps per level
+    parser.add_argument("--levels", type=int, default=3)          # number of levels
     parser.add_argument("--squeeze_factor", type=int, default=2)
     parser.add_argument("--decomp", type=str, default="NONE")     # your Conv2d1x1 setting
     parser.add_argument("--seed", type=int, default=42)
@@ -54,13 +70,39 @@ def main():
         # (optional) tiny uniform dequantization:
         # transforms.Lambda(lambda x: (x + torch.rand_like(x)/256.).clamp(0., 1.)),
     ])
-    train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=torch.cuda.is_available())
+
+    # train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
+    # train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+    #                           num_workers=args.num_workers, pin_memory=torch.cuda.is_available())
+
+    # --- For training------------
+    train_ds = MNIST32_X_Noise("mnist32_heteronoise_train.pt")
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        )
+    # ------------------------
+    
+    # --- For eval------------
+    transform32 = transforms.Compose([
+    transforms.Pad(2, fill=0),  # 28 -> 32 with black border
+    transforms.ToTensor(),      # -> [0,1], shape (1,32,32)
+    ])
+
+    ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform32)
+    dl = DataLoader(ds, batch_size=5, shuffle=False, num_workers=0, pin_memory=torch.cuda.is_available())
+    imgs32, _ = next(iter(dl))  # (5,1,32,32), first five
+
+    # device = next(model.parameters()).device
+    imgs32 = imgs32.to(device)
+    # ------------------------
 
     # --- Model ---
-    x_shape = (1, 28, 28)  # NCHW per-sample shape (MNIST grayscale)
-    model = Glow(
+    x_shape = (1, 32, 32)  # NCHW per-sample shape (MNIST grayscale)
+    model = NoiseFlow(
         x_shape=x_shape,
         n_levels=args.levels,
         depth=args.depth,
@@ -78,11 +120,17 @@ def main():
     global_step = 0
     for epoch in range(1, args.epochs + 1):
         running_nll = 0.0
-        for i, (x, _) in enumerate(train_loader):
+        for i, (x, noise) in enumerate(train_loader):
+
+            I = x # original image
+            x = noise # noise mask
+
             x = x.to(device)
+            I = I.to(device)
+
             optimizer.zero_grad()
 
-            nll, sd_z = model.loss(x)     # nll is mean over batch
+            nll, sd_z = model.loss(x,I)     # nll is mean over batch
             nll.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0) # TODO check
             optimizer.step()
@@ -98,7 +146,7 @@ def main():
                 running_nll = 0.0
 
         # save checkpoint each epoch
-        ckpt_path = os.path.join(args.outdir, f"glow_mnist_epoch{epoch}.pt")
+        ckpt_path = os.path.join(args.outdir, f"noise_flow_mnist_epoch{epoch}.pt")
         torch.save({
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
@@ -108,21 +156,37 @@ def main():
         print(f"Saved checkpoint: {ckpt_path}")
 
     # --- Sampling (5 images) ---
+    # model.eval()
+    # with torch.no_grad():
+    #     samples = model.inverse(z=None, batch_size=5).detach().cpu()   # (5,1,28,28)
+    #     samples = samples.clamp(0.0, 1.0)
+
+    #     # Convert to uint8 [0,255] with proper rounding
+    #     samples_u8 = (samples * 255.0).round().to(torch.uint8)        # (5,1,28,28)
+
+    #     # Save each image as grayscale PNG ('L' mode)
+    #     os.makedirs(args.outdir, exist_ok=True)
+    #     for i in range(samples_u8.size(0)):
+    #         img = samples_u8[i, 0].numpy()                            # (28,28), uint8
+    #         Image.fromarray(img, mode='L').save(
+    #             os.path.join(args.outdir, f"sample_uint8_{i+1}.png")
+    #         )
+
     model.eval()
     with torch.no_grad():
-        samples = model.inverse(z=None, batch_size=5).detach().cpu()   # (5,1,28,28)
-        samples = samples.clamp(0.0, 1.0)
+        # Your new inverse: takes z=None and I=<clean image>, returns a noise mask
+        noise = model.inverse(z=None, I=imgs32, batch_size=imgs32.size(0))  # expect (5,1,32,32)
+        # If your inverse returns a tuple, e.g. (noise, other), unpack accordingly.
 
-        # Convert to uint8 [0,255] with proper rounding
-        samples_u8 = (samples * 255.0).round().to(torch.uint8)        # (5,1,28,28)
+        noisy = (imgs32 + noise).clamp(0.0, 1.0)  # clean + noise (clamped to [0,1])
 
-        # Save each image as grayscale PNG ('L' mode)
+        # ---- save pairs per-folder ----
         os.makedirs(args.outdir, exist_ok=True)
-        for i in range(samples_u8.size(0)):
-            img = samples_u8[i, 0].numpy()                            # (28,28), uint8
-            Image.fromarray(img, mode='L').save(
-                os.path.join(args.outdir, f"sample_uint8_{i+1}.png")
-            )
+        for i in range(imgs32.size(0)):
+            pair_dir = os.path.join(args.outdir, f"{i:04d}")
+            os.makedirs(pair_dir, exist_ok=True)
+            save_image(imgs32[i], os.path.join(pair_dir, "clean.png"))             # clean (1,32,32)
+            save_image(noisy[i],  os.path.join(pair_dir, "clean_plus_noise.png"))  # clean+noise
 
 if __name__ == "__main__":
     main()

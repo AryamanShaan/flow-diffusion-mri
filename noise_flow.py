@@ -65,7 +65,7 @@ class FlowStep(nn.Module):
         return x
 
 
-class Glow(nn.Module):
+class NoiseFlow(nn.Module):
     """
       - L levels, each: squeeze -> (depth times: permute -> affine coupling)
       - Split after each level except the top; learned conditional split prior via zero-init conv head
@@ -75,7 +75,7 @@ class Glow(nn.Module):
         self,
         x_shape,                # (C, H, W) original input shape (NCHW)
         n_levels=3,
-        depth=3,
+        depth=5,
         width=128,
         decomp='NONE',
         squeeze_factor=2,
@@ -95,6 +95,8 @@ class Glow(nn.Module):
 
         self.levels = nn.ModuleList()
         self.split_heads = nn.ModuleList()  # Split2D per level except top
+        
+        self.sid = SignalDependentLayer(x_shape=x_shape, eps= 1e-8)
 
         for level in range(n_levels):
             # After squeeze, flow steps see 4 * Cin channels
@@ -103,6 +105,9 @@ class Glow(nn.Module):
             C_flow = Cin * squeeze_factor * squeeze_factor
             # C_flow = Cin * 4
             level_shape = (C_flow, H, W)
+
+            # if not level == 0: # create sid right after first squeeze and before first block
+            #     self.sid = SignalDependentLayer(level_shape, eps= 1e-8)
 
             steps = nn.ModuleList([
                 FlowStep(
@@ -124,7 +129,7 @@ class Glow(nn.Module):
                 # top level ends here
 
     # -------- Loss path: x -> z (inverse in TF naming) --------
-    def forward(self, x):
+    def forward(self, x, I):
         """
         x: (N, C, H, W)
         Returns: z, objective   where objective = sum of all ldj + top prior logp(z)
@@ -132,11 +137,17 @@ class Glow(nn.Module):
         z = x
         objective = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
 
+        z, ldj = self.sid.forward(z, I)
+        objective = objective + ldj
+
         for level, steps in enumerate(self.levels):
             # squeeze
             # print(z.shape)
             # print(self.squeeze_factor)
             z = squeeze2d(z, factor=self.squeeze_factor, squeeze_type=self.squeeze_type)
+
+            # if level ==0: # only pass thru signal dependent layer before first block
+            #     z = self.sid.forward(z, I)
 
             # depth flow steps
             for step in steps:
@@ -154,7 +165,7 @@ class Glow(nn.Module):
         return z, objective
 
     # -------- Sampling path: z -> x (forward in TF naming) --------
-    def inverse(self, z=None, eps_std=None, batch_size=None):
+    def inverse(self, z=None, I=None, eps_std=None, batch_size=None):
         """
         If z is None: sample from top standard normal with same shape as top latent of a dummy input
         eps_std: optional per-sample std scaling (B,) used only in split reverses (matches TF)
@@ -181,6 +192,10 @@ class Glow(nn.Module):
                 split = self.split_heads[level]
                 x = split.reverse(x, eps_std=eps_std)
 
+
+            # if level == 0: # only pass thru signal dependent layer after the first block
+            #     x = self.sid.inverse(x, I)
+
             # steps in reverse order (generative direction)
             steps = self.levels[level]
             for step in reversed(steps):
@@ -188,6 +203,8 @@ class Glow(nn.Module):
 
             # unsqueeze
             x = unsqueeze2d(x, factor=self.squeeze_factor, squeeze_type=self.squeeze_type)
+
+        x = self.sid.inverse(x, I)
 
         return x
 
@@ -219,13 +236,13 @@ class Glow(nn.Module):
     #     return x
 
     # -------- Loss wrapper (matches TF .loss) --------
-    def loss(self, x):
+    def loss(self, x, I):
         """
         Returns mean NLL and sd_z (mean per-sample std of top latent across spatial+channels)
         """
         # objective as (N,)
         # objective = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
-        z, objective = self.forward(x)  # x->z (ldj + split prior logp)
+        z, objective = self.forward(x, I)  # x->z (ldj + split prior logp)
         # add top prior logp (same as TF ._loss)
  
         # objective += self._standard_normal_logp(z) # likelihood w.r.t. to gaussian normal

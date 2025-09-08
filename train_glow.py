@@ -1,4 +1,7 @@
 # train_glow.py
+'''
+python train_glow.py --epochs 20 --batch_size 32
+'''
 import os
 from PIL import Image
 import math

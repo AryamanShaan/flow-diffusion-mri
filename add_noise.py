@@ -1,18 +1,18 @@
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torchvision import datasets
 from torchvision.transforms import ToTensor
 import math
 import torchvision
 from torchvision import datasets, transforms
+import torch.nn.functional as F
+from torchvision.utils import save_image
 
 # ------------------------ core noise function ---------------------------------
 @torch.no_grad()
 def add_heteroscedastic_gaussian(
     x,
-    clamp=True,
-    return_all=False,
+    clamp=True
 ):
     """
     x:           (C,H,W) or (N,C,H,W) in [0,1]
@@ -42,80 +42,164 @@ def add_heteroscedastic_gaussian(
     if clamp:
         y = y.clamp(0.0, 1.0)
 
-    if return_all:
-        return x, noise, y, std
-    return y, noise, std
+    return noise, y, x
 
 
-
-
-# ------------------------ Creating Dataset -----------------------------
-def precompute_mnist_noise(save_path="mnist_heteronoise_train.pt",
-                           train=True,
-                           batch_size=512,
-                           clamp=True,
-                           seed=123):
+# ------------------------ Creating Padded+Noisy Dataset -----------------------------
+def precompute_mnist32_noise(save_path="mnist32_heteronoise_train.pt",
+                             train=True,
+                             batch_size=512,
+                             clamp=True,
+                             seed=123):
+    """
+    - Loads MNIST (N,1,28,28) in [0,1]
+    - Pads to (N,1,32,32) with zeros (black)
+    - Adds heteroscedastic Gaussian noise via your add_heteroscedastic_gaussian()
+    - Saves a .pt with keys: 'x' (clean padded), 'noise', 'y' (noisy), 'clamp', 'seed', 'split'
+    """
     torch.manual_seed(seed)
 
     ds = datasets.MNIST(root="data", train=train, download=True, transform=transforms.ToTensor())
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=False)
 
-    xs, noises, ys, stds = [], [], [], []
-    for imgs, _ in dl:                  # imgs: (N,1,28,28) in [0,1]
-        imgs = imgs.float()
-        # a = torch.as_tensor(alpha, dtype=imgs.dtype, device=imgs.device)   # broadcastable
-        # d = torch.as_tensor(delta, dtype=imgs.dtype, device=imgs.device)
-        x, noise, y, std = add_heteroscedastic_gaussian(imgs, clamp=clamp, return_all=True)
-        xs.append(x.cpu()); noises.append(noise.cpu()); ys.append(y.cpu()); stds.append(std.cpu())
+    xs, noises, ys = [], [], []
+    with torch.no_grad():  # your noise fn is also @no_grad; this just avoids accidental grads elsewhere
+        for imgs, _ in dl:                       # imgs: (N,1,28,28) in [0,1]
+            imgs = imgs.float()
+            # pad (left, right, top, bottom) = (2,2,2,2) -> (N,1,32,32)
+            imgs32 = F.pad(imgs, pad=(2, 2, 2, 2), mode='constant', value=0.0)
+            
+
+            noise, y, x = add_heteroscedastic_gaussian(imgs32, clamp=clamp)  # uses your exact function
+            # print(x.min().item(), x.max().item())
+            # print(f"min={x.min().item():.6f}  max={x.max().item():.6f}")
+
+            xs.append(x.cpu()); noises.append(noise.cpu()); ys.append(y.cpu())
 
     out = {
-        "x": torch.cat(xs, 0),         # clean
-        "noise": torch.cat(noises, 0), # sampled noise
-        "y": torch.cat(ys, 0),         # noisy
-        "std": torch.cat(stds, 0),     # per-pixel std
-        # "alpha": float(alpha),
-        # "delta": float(delta),
+        "x":     torch.cat(xs, 0),          # clean, padded to 32x32
+        "noise": torch.cat(noises, 0),      # sampled noise
+        "y":     torch.cat(ys, 0),          # noisy, padded
         "clamp": bool(clamp),
-        "seed": int(seed),
+        "seed":  int(seed),
         "split": "train" if train else "test",
     }
     torch.save(out, save_path)
-    print(f"Saved: {save_path}  shapes -> x:{out['x'].shape} noise:{out['noise'].shape} y:{out['y'].shape} std:{out['std'].shape}")
+    print(f"Saved: {save_path}  shapes -> x:{out['x'].shape} noise:{out['noise'].shape} y:{out['y'].shape}")
+    sample_root = os.path.join(os.path.dirname(save_path), "sample_heteroscedastic_noise")
+    os.makedirs(sample_root, exist_ok=True)
 
-# Example:
-# precompute_mnist_noise("mnist_heteronoise_train.pt", train=True,  alpha=0.1, delta=0.01, clamp=False)
-# precompute_mnist_noise("mnist_heteronoise_test.pt",  train=False, alpha=0.5, delta=0.01, clamp=False)
+    x_show = out["x"][:5]   # (5,1,32,32)
+    y_show = out["y"][:5]   # (5,1,32,32)
+
+    for i, (x_im, y_im) in enumerate(zip(x_show, y_show)):
+        pair_dir = os.path.join(sample_root, f"{i:04d}")
+        os.makedirs(pair_dir, exist_ok=True)
+        # Save clean and noisy images separately
+        save_image(x_im, os.path.join(pair_dir, "x.png"))  # clean (32x32)
+        save_image(y_im, os.path.join(pair_dir, "y.png"))  # noisy (32x32)
+
+    print(f"Wrote sample pairs to: {sample_root}")
 
 
+def save_mnist32_uniform_noise_pairs(
+    outdir: str,
+    n: int = 5,
+    train: bool = True,
+    clamp: bool = True,
+    seed: int | None = None,
+    ):
+    """
+    - Loads the first `n` MNIST images (scaled to [0,1])
+    - Pads each to (1, 32, 32) with zeros (black border)
+    - Adds per-pixel Uniform[0,1] noise
+    - Clamps noisy images to [0,1] if `clamp` is True
+    - Saves per-sample folders under `outdir` with:
+        clean.png          (clean 32x32 image)
+        noisy.png          (clean + uniform noise, clamped if requested)
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
 
+    # ToTensor -> [0,1]; Pad(2) -> 28x28 -> 32x32 with black padding
+    transform32 = transforms.Compose([
+        transforms.Pad(2, fill=0),
+        transforms.ToTensor(),
+    ])
 
-# ------------------------ Function for loading Dataset -----------------------------
-class NoiseMaskDataset(Dataset):
-    def __init__(self, pt_path, input_key="x", target_key="noise"):
-        """
-        input_key:  "x" (clean) or "y" (noisy) depending on your task
-        target_key: "noise" or "std" (or even "y" for supervised denoising)
-        """
-        d = torch.load(pt_path, map_location="cpu")
-        self.data = d
-        self.x = d[input_key]    # (N,1,28,28)
-        self.t = d[target_key]   # (N,1,28,28)
+    # First n images in deterministic order
+    ds = datasets.MNIST(root="./data", train=train, download=True, transform=transform32)
+    dl = DataLoader(ds, batch_size=n, shuffle=False, num_workers=0, pin_memory=False)
+    imgs, _ = next(iter(dl))                 # (n,1,32,32), already in [0,1]
+    imgs = imgs.clamp_(0.0, 1.0)
 
-    def __len__(self):
-        return self.x.size(0)
+    # Uniform[0,1] per-pixel noise, same shape as imgs
+    noise = torch.rand_like(imgs)
+    noisy = imgs + noise
+    if clamp:
+        noisy.clamp_(0.0, 1.0)
 
-    def __getitem__(self, idx):
-        return self.x[idx], self.t[idx]
+    # Save pairs: outdir/0000/clean.png, outdir/0000/noisy.png, ...
+    os.makedirs(outdir, exist_ok=True)
+    for i in range(n):
+        pair_dir = os.path.join(outdir, f"{i:04d}")
+        os.makedirs(pair_dir, exist_ok=True)
+        save_image(imgs[i],  os.path.join(pair_dir, "clean.png"))
+        save_image(noisy[i], os.path.join(pair_dir, "noisy.png"))
 
-# Example:
-# train_ds = NoiseMaskDataset("mnist_heteronoise_train.pt", input_key="x", target_key="noise")
-# train_dl = DataLoader(train_ds, batch_size=64, shuffle=True)
-
+    print(f"Saved {n} clean/noisy pairs to: {outdir}")
     
+def save_mnist32_gaussian_noise_pairs(
+    outdir: str,
+    n: int = 5,
+    train: bool = True,
+    clamp: bool = True,
+    sigma: float = 1.0,
+    seed: int | None = None,
+):
+    """
+    - Loads the first `n` MNIST images (scaled to [0,1])
+    - Pads each to (1,32,32) with zero (black) border
+    - Adds per-pixel Gaussian noise ~ N(0, sigma^2)
+    - Clamps to [0,1] if `clamp` is True
+    - Saves per-sample folders:
+        <outdir>/0000/clean.png
+        <outdir>/0000/noisy.png
+        ...
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    transform32 = transforms.Compose([
+        transforms.Pad(2, fill=0),  # 28->32
+        transforms.ToTensor(),      # -> [0,1], (1,32,32)
+    ])
+
+    ds = datasets.MNIST(root="./data", train=train, download=True, transform=transform32)
+    dl = DataLoader(ds, batch_size=n, shuffle=False, num_workers=0, pin_memory=False)
+    imgs, _ = next(iter(dl))              # (n,1,32,32), in [0,1]
+    imgs = imgs.clamp_(0.0, 1.0)
+
+    # Gaussian noise N(0, sigma^2 I)
+    noise = torch.randn_like(imgs) * float(sigma)
+    noisy = imgs + noise
+    if clamp:
+        noisy.clamp_(0.0, 1.0)
+
+    os.makedirs(outdir, exist_ok=True)
+    for i in range(n):
+        pair_dir = os.path.join(outdir, f"{i:04d}")
+        os.makedirs(pair_dir, exist_ok=True)
+        save_image(imgs[i],  os.path.join(pair_dir, "clean.png"))
+        save_image(noisy[i], os.path.join(pair_dir, "noisy.png"))
+
+    print(f"Saved {n} clean/noisy Gaussian pairs to: {outdir}")
 
 # For testing
 def main():
-    precompute_mnist_noise("mnist_heteronoise_train.pt", train=True, clamp=True)
+    # precompute_mnist32_noise("mnist32_heteronoise_train.pt", train=True, clamp=True)
+    # save_mnist32_uniform_noise_pairs(outdir="sample_uniform_noise", n=5, train=True, clamp=True, seed=123)
+    save_mnist32_gaussian_noise_pairs(outdir="sample_gaussian_noise",n=5,train=True,clamp=True,sigma=1.0,seed=123)
 
 if __name__ == "__main__":
     main()
