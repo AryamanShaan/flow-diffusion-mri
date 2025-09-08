@@ -54,7 +54,7 @@ def main():
     parser.add_argument("--squeeze_factor", type=int, default=2)
     parser.add_argument("--decomp", type=str, default="NONE")     # your Conv2d1x1 setting
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--outdir", type=str, default="runs_glow_mnist")
+    parser.add_argument("--outdir", type=str, default="runs_NoiseFlow_mnist")
     parser.add_argument("--num_workers", type=int, default=2)
     args = parser.parse_args()
 

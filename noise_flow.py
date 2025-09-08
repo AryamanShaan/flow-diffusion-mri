@@ -24,7 +24,8 @@ class FlowStep(nn.Module):
         # self.perm_type = 'conv1x1'
 
         # coupling subnet: map pass-through half (C/2,H,W) -> (shift, log_scale) for the other half
-        st_net = subnetMLP(x_shape=(C // 2, H, W), hidden_layers=[width, width], shift_only=False)
+        # st_net = subnetMLP(x_shape=(C // 2, H, W), hidden_layers=[width, width], shift_only=False)
+        st_net = SubnetConv(x_shape=(C // 2, H, W), width=width, shift_only=False)
         self.coupling = AffineCoupling(x_shape=x_shape, shift_and_log_scale_fn=st_net)
 
         self.C = C
@@ -74,7 +75,7 @@ class NoiseFlow(nn.Module):
     def __init__(
         self,
         x_shape,                # (C, H, W) original input shape (NCHW)
-        n_levels=3,
+        n_levels=4,
         depth=5,
         width=128,
         decomp='NONE',
@@ -127,6 +128,9 @@ class NoiseFlow(nn.Module):
             else:
                 self.split_heads.append(None)
                 # top level ends here
+            
+            # if level == n_levels-1:
+            #     self.sid = SignalDependentLayer(x_shape=level_shape , eps= 1e-8)
 
     # -------- Loss path: x -> z (inverse in TF naming) --------
     def forward(self, x, I):
@@ -145,9 +149,8 @@ class NoiseFlow(nn.Module):
             # print(z.shape)
             # print(self.squeeze_factor)
             z = squeeze2d(z, factor=self.squeeze_factor, squeeze_type=self.squeeze_type)
+            # I = squeeze2d(I, factor=self.squeeze_factor, squeeze_type=self.squeeze_type)
 
-            # if level ==0: # only pass thru signal dependent layer before first block
-            #     z = self.sid.forward(z, I)
 
             # depth flow steps
             for step in steps:
@@ -158,6 +161,11 @@ class NoiseFlow(nn.Module):
             if level < self.n_levels - 1:
                 split = self.split_heads[level]
                 z, objective = split(z, objective)
+            
+            # if level == self.n_levels-1:
+            #     z, ldj = self.sid.forward(z, I)
+            #     objective = objective + ldj
+
 
         # top prior: standard normal logp
         # objective += self._standard_normal_logp(z) # likelihood w.r.t. to gaussian normal
@@ -174,6 +182,9 @@ class NoiseFlow(nn.Module):
             C0, H, W = self.orig_shape
             Cin = C0
             for level in range(self.n_levels):
+                
+                # I = squeeze2d(I, factor=self.squeeze_factor, squeeze_type=self.squeeze_type)
+
                 H = H // self.squeeze_factor
                 W = W // self.squeeze_factor
                 C_flow = Cin * self.squeeze_factor * self.squeeze_factor
@@ -187,6 +198,10 @@ class NoiseFlow(nn.Module):
 
         x = z
         for level in reversed(range(self.n_levels)):
+            
+            # if level == self.n_levels-1:
+            #     x = self.sid.inverse(x, I)
+
             # split reverse (except top)
             if level < self.n_levels - 1:
                 split = self.split_heads[level]

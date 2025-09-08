@@ -197,9 +197,13 @@ def save_mnist32_gaussian_noise_pairs(
 
 # For testing
 def main():
-    # precompute_mnist32_noise("mnist32_heteronoise_train.pt", train=True, clamp=True)
+    # precompute_mnist32_noise("mnist32_heteronoise_train.pt", train=True, clamp=True) # creates heteroscedastic noise dataset
+
     # save_mnist32_uniform_noise_pairs(outdir="sample_uniform_noise", n=5, train=True, clamp=True, seed=123)
-    save_mnist32_gaussian_noise_pairs(outdir="sample_gaussian_noise",n=5,train=True,clamp=True,sigma=1.0,seed=123)
+
+    # save_mnist32_gaussian_noise_pairs(outdir="sample_gaussian_noise",n=5,train=True,clamp=True,sigma=1.0,seed=123)
+    
+    pass
 
 if __name__ == "__main__":
     main()

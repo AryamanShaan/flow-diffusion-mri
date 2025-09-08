@@ -202,7 +202,63 @@ class subnetMLP(nn.Module):
         out = out.reshape(N, 2 * C, H, W)
         shift, log_scale = torch.split(out, [C, C], dim=1)
         return shift, log_scale
-        
+
+
+
+class SubnetConv(nn.Module):
+    """
+    Conv subnet for RealNVP/Glow-style coupling:
+      in:  (N, C_in, H, W)    # pass-through half
+      out: (shift, log_scale) each (N, C_in, H, W)
+    If shift_only=True, returns (shift, None).
+    """
+    def __init__(self, x_shape, width=128, shift_only=False, logscale_factor=1.0):
+        super().__init__()
+        C_in, H, W = x_shape
+        self.C_in, self.H, self.W = C_in, H, W
+        self.shift_only = shift_only
+
+        self.conv1 = nn.Conv2d(C_in, width, kernel_size=3, padding=1, bias=True)
+        self.bn1   = nn.BatchNorm2d(width)
+        self.act1  = nn.ReLU(inplace=True)
+
+        self.conv2 = nn.Conv2d(width, width, kernel_size=1, padding=0, bias=True)
+        self.bn2   = nn.BatchNorm2d(width)
+        self.act2  = nn.ReLU(inplace=True)
+
+        out_ch = C_in if shift_only else 2 * C_in
+        # your zero-init projection layer
+        self.proj  = Conv2dZeros(width, out_ch, kernel_size=3, stride=1, logscale_factor=logscale_factor)
+
+        # ---- initialization (He/Kaiming for convs) ----
+        nn.init.kaiming_normal_(self.conv1.weight, nonlinearity='relu')
+        nn.init.zeros_(self.conv1.bias)
+        nn.init.kaiming_normal_(self.conv2.weight, nonlinearity='relu')
+        nn.init.zeros_(self.conv2.bias)
+        # self.proj is already zero-initialized by Conv2dZeros
+
+    def forward(self, x):
+        """
+        x: (N, C_in, H, W)
+        returns: (shift, log_scale) or (shift, None) if shift_only
+        """
+        N, C, H, W = x.shape
+        assert (C, H, W) == (self.C_in, self.H, self.W), \
+            f"Expected (N,{self.C_in},{self.H},{self.W}), got {tuple(x.shape)}"
+
+        h = self.act1(self.bn1(self.conv1(x)))
+        h = self.act2(self.bn2(self.conv2(h)))
+        out = self.proj(h)  # zero-init => identity start
+
+        if self.shift_only:
+            shift = out
+            log_scale = None
+            return shift, log_scale
+
+        # split channels: (N, 2*C_in, H, W) -> two (N, C_in, H, W)
+        shift, log_scale = torch.split(out, [C, C], dim=1)
+        return shift, log_scale
+
 
 
 
